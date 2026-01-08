@@ -30,7 +30,12 @@ SCG_DB = {
             throw new PaymentFailedException();
         }
         // 3. Save order
-        return orderRepository.save(new Order(request, payment.getTransactionId()));
+        Order order = orderRepository.save(new Order(request, payment.getTransactionId()));
+
+        // 4. Send confirmation email
+        emailService.sendConfirmation(order.getUser(), order.getTransactionId());
+
+        return order;
     }
             """,
             "calls": [
@@ -200,9 +205,11 @@ DOSTĘPNE NARZĘDZIA:
    - Użyj direction='outgoing', aby zrozumieć, JAK działa metoda (co robi pod spodem).
    - Użyj direction='incoming', aby zrozumieć KONTEKST użycia (impact analysis).
 3. `fetch_source_code(symbol_id)`: Użyj, gdy musisz przeanalizować konkretną logikę (np. warunki if, pętle).
+4. `calculate_node_metrics(sort_by, limit)`: Użyj, gdy musisz znaleźć najbardziej ryzykowne miejsce (High Impact) oraz najbardziej skomplikowaną metodę, która może wymagać refaktoryzacji.
 
 ZASADY:
 - Nie halucynuj nazw metod. Zawsze najpierw ich wyszukaj (`search_symbols`).
+- Jeśli uytkownik o konkretny kod/logikę, zawsze uzyj `fetch_source_code` aby pobierac ten kod.
 - Odpowiedzi opieraj na faktach pobranych z narzędzi.
 - Jeśli użytkownik pyta "co się stanie, gdy zmienię X?", ZAWSZE sprawdź, kto woła X (`analyze_dependencies` z direction='incoming').
 """)
@@ -215,27 +222,27 @@ def run_scenario(query):
         last_msg = event["messages"][-1]
         if last_msg.type == "ai":
             if hasattr(last_msg, 'tool_calls') and last_msg.tool_calls :
-                print(f"🤖 Agent decyduje: Użyję narzędzi: {[f"{t['name']}: {t['args']}" for t in last_msg.tool_calls]}")
+                print(f"\nAgent używa narzędzi: {[f"{t['name']}: {t['args']}" for t in last_msg.tool_calls]}")
             else:
-                print(f"🤖 Agent odpowiada: {last_msg.content[-1]["text"]}")
+                print(f"\nAgent odpowiada: {last_msg.content[-1]["text"]}")
         if last_msg.type == "tool":
-            print(f"Narzędzie {last_msg.name} zwróciło: {last_msg.content}")
+            print(f"\nNarzędzie {last_msg.name} zwróciło: {last_msg.content}")
 
 
-# # Cel: Sprawdzić, czy system znajdzie użycie StripeClient.
-# run_scenario(
-#     "Czy korzystamy z zewnętrznych bibliotek do płatności? Jeśli tak, to jakie?"
-# )
+# Cel: Sprawdzić, czy system znajdzie użycie StripeClient.
+run_scenario(
+    "Czy korzystamy z zewnętrznych bibliotek do płatności? Jeśli tak, to jakie?"
+)
 
-# # Cel: Zobaczyć, czy agent sam znajdzie "OrderService" i pobierze kod.
-# run_scenario(
-#     "Jak działa proces składania zamówienia w tym projekcie? Interesuje mnie logika biznesowa.", 
-# )
+# Cel: Zobaczyć, czy agent sam znajdzie "OrderService" i pobierze kod.
+run_scenario(
+    "Jak działa proces składania zamówienia w tym projekcie? Interesuje mnie logika biznesowa.", 
+)
 
-# # Cel: Sprawdzić, czy agent wykryje, że PaymentProcessor jest używany przez OrderService.
-# run_scenario(
-#     "Planuję zmienić sygnaturę metody charge w PaymentProcessor. O jakich klasach muszę pamiętać?", 
-# )
+# Cel: Sprawdzić, czy agent wykryje, że PaymentProcessor jest używany przez OrderService.
+run_scenario(
+    "Planuję zmienić sygnaturę metody charge w PaymentProcessor. O jakich klasach muszę pamiętać?", 
+)
 
 # Cel: Sprawdzić, czy agent użyje narzędzia calculate_node_metrics i zidentyfikuje GlobalConfig#get jako ryzykowne miejsce oraz OrderService#placeOrder jako kandydata na refaktoryzację.
 run_scenario(
