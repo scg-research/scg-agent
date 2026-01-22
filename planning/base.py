@@ -2,25 +2,27 @@
 Base types, utilities, and shared components for LangGraph planning frameworks.
 """
 
-from typing import TypedDict, List, Optional, Annotated, Callable, Any
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMessage
-from langchain_core.tools import BaseTool
+from typing import TypedDict, List, Optional, Annotated
+from langchain_core.messages import BaseMessage, AIMessage, ToolMessage
 from langgraph.graph import add_messages
 
 
 class BaseAgentState(TypedDict):
     """Base state shared by all planning frameworks."""
+
     messages: Annotated[List[BaseMessage], add_messages]
     final_answer: Optional[str]
 
 
 class PlanningState(BaseAgentState):
     """State for plan-based frameworks (Plan-and-Solve, AdaPlanner)."""
+
     plan: List[str]
 
 
 class ReflexionState(BaseAgentState):
     """State for Reflexion framework with critique loop."""
+
     draft_answer: str
     critique: str
     iteration: int
@@ -28,6 +30,7 @@ class ReflexionState(BaseAgentState):
 
 class AdaPlannerState(BaseAgentState):
     """State for AdaPlanner with adaptive re-planning."""
+
     current_plan: List[str]
     completed_steps: List[str]
     current_step_index: int
@@ -36,6 +39,7 @@ class AdaPlannerState(BaseAgentState):
 
 class LATSState(BaseAgentState):
     """State for LATS (Best-of-N) framework."""
+
     candidates: List[dict]
     scores: List[float]
     best_path: str

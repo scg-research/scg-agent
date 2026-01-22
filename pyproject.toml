@@ -10,8 +10,9 @@ dependencies = [
     "langchain-openai>=1.1.5",
     "langgraph>=1.0.5",
     "pydantic>=2.12.5",
-    "scg-experiments",
+    "mcp>=1.1.0",
+    "grandalf>=0.8",
 ]
 
 [tool.uv.sources]
-scg-experiments = { path = "../scg-experiments", editable = true }
+# scg-experiments = { path = "../scg-experiments", editable = true }
