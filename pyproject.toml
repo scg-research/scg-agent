@@ -1,7 +1,7 @@
 [project]
 name = "scg-agent"
 version = "0.1.0"
-description = "Add your description here"
+description = "Agentic system for code comprehension using Semantic Code Graph"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -10,4 +10,8 @@ dependencies = [
     "langchain-openai>=1.1.5",
     "langgraph>=1.0.5",
     "pydantic>=2.12.5",
+    "scg-experiments",
 ]
+
+[tool.uv.sources]
+scg-experiments = { path = "../scg-experiments", editable = true }

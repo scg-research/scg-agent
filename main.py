@@ -1,4 +1,6 @@
 import json
+import os
+from pathlib import Path
 from typing import Annotated, Literal, TypedDict
 from langchain_core.tools import tool
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -7,75 +9,15 @@ from langgraph.prebuilt import ToolNode
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph.message import add_messages
 
-SCG_DB = {
-    "nodes": {
-        "com.eshop.orders.OrderService": {
-            "type": "CLASS",
-            "loc": 150,
-            "doc": "Serwis orkiestrujący proces składania zamówienia.",
-            "dependencies": ["com.eshop.payments.PaymentProcessor", "com.eshop.inventory.InventoryService"]
-        },
-        "com.eshop.orders.OrderService#placeOrder": {
-            "type": "METHOD",
-            "loc": 45,
-            "code": """
-    public OrderConfirmation placeOrder(OrderRequest request) {
-        // 1. Validate inventory
-        if (!inventoryService.checkStock(request.getProductId())) {
-            throw new OutOfStockException();
-        }
-        // 2. Process payment
-        PaymentResult payment = paymentProcessor.charge(request.getUser(), request.getAmount());
-        if (!payment.isSuccess()) {
-            throw new PaymentFailedException();
-        }
-        // 3. Save order
-        Order order = orderRepository.save(new Order(request, payment.getTransactionId()));
+# Import the SCG bridge
+from src import SCGBridge
 
-        // 4. Send confirmation email
-        emailService.sendConfirmation(order.getUser(), order.getTransactionId());
+# Initialize the SCG bridge with the path to the data and source code
+# Adjust these paths based on your actual data location
+DATA_PATH = Path(__file__).parent.parent / "scg-experiments" / "data" / "glide"
+CODE_PATH = Path(__file__).parent.parent / "scg-experiments" / "code" / "glide-4.5.0"
 
-        return order;
-    }
-            """,
-            "calls": [
-                "com.eshop.inventory.InventoryService#checkStock",
-                "com.eshop.payments.PaymentProcessor#charge",
-                "com.eshop.orders.OrderRepository#save",
-                "com.eshop.notifications.EmailService#sendConfirmation"
-            ],
-            "called_by": [
-                "com.eshop.api.OrderController#createOrder"
-            ]
-        },
-        "com.eshop.utils.GlobalConfig#get": {
-            "type": "METHOD",
-            "loc": 10,
-            "calls": [],
-            "called_by": [
-                "com.eshop.orders.OrderService#placeOrder",
-                "com.eshop.payments.PaymentProcessor#charge",
-                "com.eshop.inventory.InventoryService#checkStock",
-                "com.eshop.notifications.EmailService#sendConfirmation" ,
-                "com.eshop.api.OrderController#createOrder"
-            ]
-        },
-        "com.eshop.payments.PaymentProcessor#charge": {
-            "type": "METHOD",
-            "loc": 20,
-            "code": "public PaymentResult charge(User user, BigDecimal amount) { ... }",
-            "calls": ["com.stripe.StripeClient#createCharge"],
-            "called_by": ["com.eshop.orders.OrderService#placeOrder"]
-        },
-        "com.eshop.inventory.InventoryService#checkStock": {
-            "type": "METHOD",
-            "loc": 15,
-            "code": "public boolean checkStock(String productId) { ... }",
-            "calls": [],
-            "called_by": ["com.eshop.orders.OrderService#placeOrder"]
-        }
-    }
-}
+scg_bridge = SCGBridge(str(DATA_PATH), code_path=str(CODE_PATH))
 
 @tool
 def search_symbols(query: str):
@@ -84,24 +26,46 @@ def search_symbols(query: str):
     Użyj tego na początku, gdy nie znasz dokładnych nazw klas/metod.
     Zwraca listę pasujących ID węzłów.
     """
-    results = []
-    for node_id, data in SCG_DB["nodes"].items():
-        if query.lower() in node_id.lower():
-            results.append({"id": node_id, "type": data["type"]})
-    return json.dumps(results)
+    results = scg_bridge.search_symbols(query, limit=10)
+    # Format for compatibility with existing agent prompts
+    simplified = [{"id": r["id"], "type": r["type"], "display_name": r["display_name"]} for r in results]
+    return json.dumps(simplified, indent=2)
 
 @tool
-def fetch_source_code(symbol_id: str):
+def fetch_source_code(symbol_id: str, context_lines: int = 5):
     """
     Pobiera kod źródłowy dla danego symbolu (np. metody lub klasy).
     Wymaga podania dokładnego ID symbolu (np. z wyniku search_symbols).
+    
+    Args:
+        symbol_id: ID symbolu do pobrania
+        context_lines: Liczba linii kontekstu przed i po definicji (domyślnie 5)
     """
-    node = SCG_DB["nodes"].get(symbol_id)
-    if not node:
+    if not scg_bridge.node_exists(symbol_id):
         return f"Error: Symbol '{symbol_id}' not found via SCG Index."
-    if "code" not in node:
-        return f"Info: Symbol '{symbol_id}' exists but has no source code attached (might be an interface or abstract)."
-    return node["code"]
+    
+    # Try to get source code with context
+    source_code = scg_bridge.get_source_code(symbol_id, context_padding=context_lines)
+    if source_code:
+        metadata = scg_bridge.get_node_metadata(symbol_id)
+        location = metadata.get("location") if metadata else None
+        
+        result = f"Source code for '{symbol_id}':\n"
+        if location:
+            result += f"Location: {location.uri} (lines {location.startLine}-{location.endLine})\n"
+        if context_lines > 0:
+            result += f"Context: +/- {context_lines} lines\n"
+        result += f"\n{source_code}"
+        return result
+    
+    # If no source code, return metadata information
+    metadata = scg_bridge.get_node_metadata(symbol_id)
+    if metadata:
+        location = metadata.get("location")
+        loc_str = f"{location.uri}:{location.startLine}:{location.startCharacter}" if location else "N/A"
+        return f"Info: Symbol '{symbol_id}' exists but has no source code available.\nType: {metadata.get('kind', 'UNKNOWN')}\nDisplay Name: {metadata.get('display_name', 'N/A')}\nLocation: {loc_str}"
+    
+    return f"Info: Symbol '{symbol_id}' exists but has no source code attached (might be an interface or abstract)."
 
 @tool
 def analyze_dependencies(symbol_id: str, direction: str = "outgoing"):
@@ -112,17 +76,16 @@ def analyze_dependencies(symbol_id: str, direction: str = "outgoing"):
         direction: "outgoing" (kogo ta metoda woła?) lub "incoming" (kto woła tę metodę?).
     Przydatne do Impact Analysis (co się zepsuje, jak to zmienię?).
     """
-    node = SCG_DB["nodes"].get(symbol_id)
-    if not node:
+    if not scg_bridge.node_exists(symbol_id):
         return f"Error: Symbol '{symbol_id}' not found."
     
     if direction == "outgoing":
-        calls = node.get("calls", [])
-        return json.dumps({"symbol": symbol_id, "calls_external_methods": calls})
+        calls = scg_bridge.get_outgoing_dependencies(symbol_id)
+        return json.dumps({"symbol": symbol_id, "calls_external_methods": calls}, indent=2)
     
     elif direction == "incoming":
-        called_by = node.get("called_by", [])
-        return json.dumps({"symbol": symbol_id, "is_called_by": called_by})
+        called_by = scg_bridge.get_incoming_dependencies(symbol_id)
+        return json.dumps({"symbol": symbol_id, "is_called_by": called_by}, indent=2)
     
     return "Error: direction must be 'outgoing' or 'incoming'"
 
@@ -135,34 +98,15 @@ def calculate_node_metrics(sort_by: str = "incoming_degree", limit: int = 5):
         sort_by: Kryterium sortowania: 
                  'incoming_degree' (Impact/Popularność - kto mnie woła?), 
                  'outgoing_degree' (Complexity - kogo ja wołam?), 
-                 'loc' (Rozmiar kodu).
+                 'total_degree' (Ogólna ważność węzła).
         limit: Liczba zwracanych wyników.
         
     Returns:
         JSON z listą topowych węzłów i ich metrykami.
         Użyj tego, aby znaleźć 'Hotspoty' lub kluczowe elementy architektury (Hubs).
     """
-    metrics = []
-    
-    for node_id, data in SCG_DB["nodes"].items():
-        out_degree = len(data.get("calls", [])) + len(data.get("dependencies", []))
-        in_degree = len(data.get("called_by", []))
-        
-        loc = data.get("loc", 0)
-        
-        metrics.append({
-            "id": node_id,
-            "type": data["type"],
-            "metrics": {
-                "incoming_degree": in_degree,
-                "outgoing_degree": out_degree,
-                "loc": loc
-            }
-        })
-    
-    metrics.sort(key=lambda x: x["metrics"].get(sort_by, 0), reverse=True)
-    
-    return json.dumps(metrics[:limit], indent=2)
+    metrics = scg_bridge.calculate_node_metrics(sort_by=sort_by, limit=limit)
+    return json.dumps(metrics, indent=2)
 
 tools = [search_symbols, fetch_source_code, analyze_dependencies, calculate_node_metrics]
 
@@ -229,22 +173,34 @@ def run_scenario(query):
             print(f"\nNarzędzie {last_msg.name} zwróciło: {last_msg.content}")
 
 
-# Cel: Sprawdzić, czy system znajdzie użycie StripeClient.
-run_scenario(
-    "Czy korzystamy z zewnętrznych bibliotek do płatności? Jeśli tak, to jakie?"
-)
-
-# Cel: Zobaczyć, czy agent sam znajdzie "OrderService" i pobierze kod.
-run_scenario(
-    "Jak działa proces składania zamówienia w tym projekcie? Interesuje mnie logika biznesowa.", 
-)
-
-# Cel: Sprawdzić, czy agent wykryje, że PaymentProcessor jest używany przez OrderService.
-run_scenario(
-    "Planuję zmienić sygnaturę metody charge w PaymentProcessor. O jakich klasach muszę pamiętać?", 
-)
-
-# Cel: Sprawdzić, czy agent użyje narzędzia calculate_node_metrics i zidentyfikuje GlobalConfig#get jako ryzykowne miejsce oraz OrderService#placeOrder jako kandydata na refaktoryzację.
-run_scenario(
-    "Przeprowadź audyt projektu. Znajdź najbardziej ryzykowne miejsce (High Impact) oraz najbardziej skomplikowaną metodę, która może wymagać refaktoryzacji."
-)
+if __name__ == "__main__":
+    # Example scenarios - adapt these to your actual codebase
+    
+    # Get statistics about the loaded graph
+    stats = scg_bridge.get_statistics()
+    print(f"\n{'='*60}")
+    print(f"SCG Statistics:")
+    print(f"  Total nodes: {stats['total_nodes']}")
+    print(f"  Total edges: {stats['total_edges']}")
+    print(f"  Node kinds: {stats['node_kinds']}")
+    print(f"{'='*60}\n")
+    
+    # Scenario 1: General exploration
+    # run_scenario(
+    #     "Jakie są główne komponenty tego projektu? Pokaż mi najbardziej kluczowe klasy lub moduły."
+    # )
+    
+    # Scenario 2: Find specific functionality
+    # run_scenario(
+    #     "Gdzie w kodzie znajduje się logika obsługi cache? Jak to działa?"
+    # )
+    
+    # Scenario 3: Impact analysis
+    run_scenario(
+        "Planuję zmienić interfejs klasy Cache. Jakie miejsca w kodzie będę musiał zaktualizować?"
+    )
+    
+    # Scenario 4: Code audit
+    # run_scenario(
+    #     "Przeprowadź audyt projektu. Znajdź najbardziej ryzykowne miejsce (High Impact) oraz najbardziej skomplikowaną metodę."
+    # )
